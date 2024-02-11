@@ -1689,12 +1689,27 @@ def llama_get_embeddings(
     ctx: llama_context_p,
 ):  # type: (...) -> Array[float] # type: ignore
     """Get the embeddings for the input
-    shape: [n_embd] (1-dimensional)"""
+    shape: [n_embd, n_seq] (1-dimensional)"""
     return _lib.llama_get_embeddings(ctx)
 
 
 _lib.llama_get_embeddings.argtypes = [llama_context_p]
 _lib.llama_get_embeddings.restype = c_float_p
+
+
+# // Logits for the ith token. Equivalent to:
+# // llama_get_embeddings(ctx) + i*n_vocab
+# LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
+def llama_get_embeddings_ith(
+    ctx: llama_context_p, i: Union[c_int32, int]
+):  # type: (...) -> Array[float] # type: ignore
+    """Embeddings for the ith sequence. Equivalent to:
+    llama_get_embeddings(ctx) + i*n_embd"""
+    return _lib.llama_get_embeddings_ith(ctx, i)
+
+
+_lib.llama_get_logits_ith.argtypes = [llama_context_p, c_int32]
+_lib.llama_get_logits_ith.restype = c_float_p
 
 
 # //
