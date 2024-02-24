@@ -539,6 +539,7 @@ class llama_model_params(ctypes.Structure):
 #     bool embedding;   // embedding mode only
 #     bool offload_kqv; // whether to offload the KQV ops (including the KV cache) to GPU
 #     bool do_pooling;  // whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
+#     int32_t causal_attn; // whether to use causal attention
 # };
 class llama_context_params(ctypes.Structure):
     """Parameters for llama_context
@@ -566,6 +567,7 @@ class llama_context_params(ctypes.Structure):
         embedding (bool): embedding mode only
         offload_kqv (bool): whether to offload the KQV ops (including the KV cache) to GPU
         do_pooling (bool): whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
+        causal_attn (int): whether to use causal attention
     """
 
     _fields_ = [
@@ -591,6 +593,7 @@ class llama_context_params(ctypes.Structure):
         ("embedding", ctypes.c_bool),
         ("offload_kqv", ctypes.c_bool),
         ("do_pooling", ctypes.c_bool),
+        ("causal_attn", ctypes.c_int32),
     ]
 
 

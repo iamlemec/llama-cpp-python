@@ -90,6 +90,8 @@ class Llama:
         logits_all: bool = False,
         embedding: bool = False,
         offload_kqv: bool = True,
+        do_pooling: bool = True,
+        causal_attn: Optional[bool] = None,
         # Sampling Params
         last_n_tokens_size: int = 64,
         # LoRA Params
@@ -297,6 +299,9 @@ class Llama:
         )  # Must be set to True for speculative decoding
         self.context_params.embedding = embedding
         self.context_params.offload_kqv = offload_kqv
+
+        self.context_params.do_pooling = do_pooling
+        self.context_params.causal_attn = causal_attn if causal_attn is not None else -1
 
         # Sampling Params
         self.last_n_tokens_size = last_n_tokens_size
