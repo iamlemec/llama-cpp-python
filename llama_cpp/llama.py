@@ -48,7 +48,10 @@ from ._internals import (
     _LlamaTokenDataArray,  # type: ignore
     _LlamaSamplingParams,  # type: ignore
     _LlamaSamplingContext,  # type: ignore
-    _TokenTextQueue,  # type: ignore
+    _LlamaTokenProcessor,  # type: ignore
+    MaxTokensReached,
+    StopTokenFound,
+    StopSequenceFound,
 )
 from ._logger import set_verbose
 from ._utils import (
@@ -1001,9 +1004,6 @@ class Llama:
 
         completion_id: str = f"cmpl-{str(uuid.uuid4())}"
         created: int = int(time.time())
-        # If prompt is empty, initialize completion with BOS token to avoid
-        # detokenization including a space at the beginning of the completion
-        completion_tokens: List[int] = [] if len(prompt) > 0 else [self.token_bos()]
         # Add blank space to start of prompt to match OG llama tokenizer
         prompt_tokens: List[int] = (
             (
@@ -1014,8 +1014,6 @@ class Llama:
             if isinstance(prompt, str)
             else prompt
         )
-        text: bytes = b""
-        returned_tokens: int = 0
         stop = (
             stop if isinstance(stop, list) else [stop] if isinstance(stop, str) else []
         )
@@ -1092,14 +1090,7 @@ class Llama:
         if seed is not None:
             self._ctx.set_rng_seed(seed)
 
-        # create text token queue and state
-        queue = _TokenTextQueue(self.detokenize, stop_sequences=stop_sequences)
-        all_toks = 0
-        all_text = b""
-        finish_reason = "length"
-        multibyte_fix = 0
-
-        for token in self.generate(
+        token_stream = self.generate(
             prompt_tokens,
             top_k=top_k,
             top_p=top_p,
@@ -1116,65 +1107,60 @@ class Llama:
             stopping_criteria=stopping_criteria,
             logits_processor=logits_processor,
             grammar=grammar,
-        ):
-            if token == self._token_eos:
-                finish_reason = "stop"
-                break
+        )
 
-            # Contains multi-byte UTF8
-            for k, char in enumerate(all_text[-3:]):
-                k = 3 - k
-                for num, pattern in [(2, 192), (3, 224), (4, 240)]:
-                    # Bitwise AND check
-                    if num > k and pattern & char == pattern:
-                        multibyte_fix = num - k
+        all_text = ""
+        try:
+            for text in _LlamaTokenProcessor(
+                token_stream, self.detokenize, max_tokens, self._token_eos, stop_sequences
+            ):
+                if stream:
+                    yield {
+                        "id": completion_id,
+                        "object": "text_completion",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [
+                            {
+                                "text": text,
+                                "index": 0,
+                                "logprobs": None,
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                all_text += text
+        except MaxTokensReached:
+            finish_reason = "max_tokens"
+        except StopTokenFound:
+            finish_reason = "stop_token"
+        except StopSequenceFound:
+            finish_reason = "stop_sequence"
+        except StopIteration:
+            finish_reason = "stop_criteria"
 
-            # Stop incomplete bytes from passing
-            if multibyte_fix > 0:
-                multibyte_fix -= 1
-                continue
-
-            # Add token to queue
-            print(self.detokenize([token]))
-            queue.push_token(token)
-
-            # TODO: will this find the actual first stop?
-            stop_text = queue.detect_stop_token()
-            if stop_text is not None:
-                all_text += stop_text
-                finish_reason = "stop"
-                break
-
-            # Generate text chunks
-            while len(queue) > 0:
-                ret = queue.pop_text()
-                if ret is None:
-                    break
-                nt, bs, ts = ret
-                all_toks += nt
-                all_text += bs
-                yield ts
-
-            if all_toks >= max_tokens:
-                finish_reason = "length"
-                break
-
-        print(all_text)
-
-        if stopping_criteria is not None and stopping_criteria(
-            self._input_ids, self._scores[-1, :]
-        ):
-            finish_reason = "stop"
+        yield {
+            "id": completion_id,
+            "object": "text_completion",
+            "created": created,
+            "model": model_name,
+            "choices": [
+                {
+                    "text": "" if stream else all_text,
+                    "index": 0,
+                    "logprobs": None,
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
 
         if self.verbose:
             self._ctx.print_timings()
 
-        yield finish_reason
-
         if self.cache:
             if self.verbose:
                 print("Llama._create_completion: cache save", file=sys.stderr)
-            self.cache[prompt_tokens + completion_tokens] = self.save_state()
+            self.cache[prompt_tokens] = self.save_state()
             print("Llama._create_completion: cache saved", file=sys.stderr)
 
     def create_completion(

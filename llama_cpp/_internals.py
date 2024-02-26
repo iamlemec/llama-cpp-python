@@ -820,86 +820,101 @@ class _LlamaSamplingContext:
             ctx_main.grammar_accept_token(self.grammar, id)
         self.prev.append(id)
 
-class _TokenTextQueue:
-    def __init__(self, detokenize, stop_sequences: List[int] = None):
-        # settings
-        self.detokenize = detokenize
-        self.stop_sequences = stop_sequences or []
+##
+## Stream processing
+##
 
-        # current state
-        self.tokens: List[int] = []
+class MaxTokensReached(Exception):
+    pass
 
-    def __len__(self):
-        return len(self.tokens)
+class StopTokenFound(Exception):
+    pass
 
-    @staticmethod
-    def decode_robust(bstr):
+class StopSequenceFound(Exception):
+    pass
+
+def decode_robust(bstr):
+    try:
+        return bstr.decode("utf-8")
+    except UnicodeError:
+        return
+
+def stream_result(stream):
+    results = []
+    while True:
         try:
-            return bstr.decode("utf-8")
-        except UnicodeError:
-            return
+            val = next(stream)
+            results.append(val)
+        except Exception as e:
+            return results, e
+    return results, None
 
-    def detect_stop_token(self):
-        text = self.detokenize(self.tokens)
-        stop_idxs = [text.index(s) for s in self.stop_sequences if s in text]
-        if len(stop_idxs) > 0:
-            return text[:min(stop_idxs)]
+# Yields valid UTF-8 substrings until max_tokens, stop_token, or stop_sequences
+def _LlamaTokenProcessor(tokens, detokenize, max_tokens, stop_token, stop_sequences):
+    ntoks = 0
+    buffer = b""
+    multibyte_fix = 0
 
-    # detect first index of partial stop sequence
-    def first_stop_position(self):
-        text = self.detokenize(self.tokens)
-        length = len(text)
+    for tok in tokens:
+        # Check for stop token
+        if tok == stop_token:
+            raise StopTokenFound
+
+        # Add token to byte buffer
+        ntoks += 1
+        buffer += detokenize([tok])
+
+        # Stop if max_tokens reached
+        if ntoks >= max_tokens:
+            yield buffer.decode("utf-8", errors="ignore")
+            raise MaxTokensReached
+
+        # Contains multi-byte UTF8
+        for k, char in enumerate(buffer[-3:]):
+            k = 3 - k
+            for num, pattern in [(2, 192), (3, 224), (4, 240)]:
+                # Bitwise AND check
+                if num > k and pattern & char == pattern:
+                    multibyte_fix = num - k
+
+        # Stop incomplete bytes from passing
+        if multibyte_fix > 0:
+            multibyte_fix -= 1
+            continue
+
+        # Check for termination
         first_stop_len = 0
-        for s in self.stop_sequences:
-            for i in range(min(len(s), length), 0, -1):
-                if text.endswith(s[:i]):
-                    if i > first_stop_len:
-                        first_stop_len = i
+        buffer_len = len(buffer)
+        for s in stop_sequences:
+            stop_len = len(s)
+            for k in range(min(stop_len, buffer_len), 0, -1):
+                if buffer.endswith(s[:k]):
+                    if k == stop_len:
+                        buffer = buffer[:-stop_len]
+                        if len(buffer) > 0:
+                            yield buffer.decode("utf-8", errors="ignore")
+                        raise StopSequenceFound
+                    if k > first_stop_len:
+                        first_stop_len = k
                     break
-        return length - first_stop_len
 
-    def push_token(self, token: int):
-        self.tokens.append(token)
-
-    def pop_text(self) -> bytes:
-        if len(self) == 0:
-            return
-
-        # attempt decode on substrings
-        for i in range(1, len(self.tokens) + 1):
-            bstr = self.detokenize(self.tokens[:i])
-            text = self.decode_robust(bstr)
+        # Attempt decode on substrings
+        for pos in range(len(buffer), 0, -1):
+            bstr = buffer[:pos]
+            text = decode_robust(bstr)
             if text is not None:
                 break
+        else:
+            # No valid substrings found
+            continue
 
-        # all remaining tokens cannot be decoded to a UTF-8 character
-        if text is None:
-            return
+        # Avoid yield if possible stop sequence in progress
+        if pos > buffer_len - first_stop_len:
+            continue
 
-        # avoid yield if possible stop sequence in progress
-        if len(bstr) > self.first_stop_position():
-            return
+        # Return maximal valid substring
+        buffer = buffer[pos:]
+        yield text
 
-        # trim token list
-        self.tokens = self.tokens[i:]
-
-        return i, bstr, text
-
-    def empty_text(self):
-        text = ""
-        position = 0
-        end_position = self.first_stop_position()
-
-        for token in self.tokens:
-            last_text = self.detokenize([token])
-            position += len(last_text)
-
-            if position >= end_position:
-                text += last_text[
-                    : len(last_text) - (position - end_position)
-                ].decode("utf-8", errors="ignore")
-                break
-
-            text += last_text.decode("utf-8", errors="ignore")
-
-        return text
+    # When we hit stop_criteria, yield the remaining buffer
+    yield buffer.decode("utf-8", errors="ignore")
